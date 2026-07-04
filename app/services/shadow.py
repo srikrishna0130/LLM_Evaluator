@@ -16,20 +16,38 @@ async def run_shadow(
     prompt: str,
 ) -> None:
     """Call the candidate model and persist the result on the session."""
+    session = await sessions.get(session_id)
+    mock = session.mock if session is not None else None
+
     try:
         result = await client.generate(prompt)
         await sessions.set_candidate(session_id, result, status=CandidateStatus.OK)
+
+        usage = result.usage
         log.info(
-            "shadow completed",
-            extra={
-                "session_id": session_id,
-                "model": result.model,
-                "latency_ms": result.latency_ms,
-                "total_tokens": result.usage.total_tokens if result.usage else None,
-            },
+            "shadow completed session_id=%s model=%s latency_ms=%s "
+            "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+            session_id,
+            result.model,
+            result.latency_ms,
+            usage.prompt_tokens if usage else None,
+            usage.completion_tokens if usage else None,
+            usage.total_tokens if usage else None,
         )
+
+        if mock is not None and result.text != mock.text:
+            log.warning(
+                "shadow output mismatch session_id=%s mock_json=%s candidate_json=%s",
+                session_id,
+                mock.model_dump_json(),
+                result.model_dump_json(),
+            )
     except Exception as exc:
-        log.exception("shadow failed", extra={"session_id": session_id})
+        log.exception(
+            "shadow failed session_id=%s error=%s",
+            session_id,
+            exc,
+        )
         await sessions.set_candidate(
             session_id,
             None,

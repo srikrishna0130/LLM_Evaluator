@@ -1,8 +1,118 @@
 # Shadow Model Evaluator
 
+## Requirements
+
+### Project Objective
+
+Build a proxy that serves customer traffic synchronously via a primary LLM mock endpoint while also making an asynchronous shadow request to a candidate model. Log any outputs that do not match.
+
+### Functional Expectations
+
+- **Synchronous Primary**: Route POST requests to a simulated Primary LLM endpoint and immediately return the response to the user.
+- **Async Shadow Execution**: Fire a background request to a Candidate LLM. The background context should survive even if the client's HTTP connection closes.
+- **Mismatch Logging**: Compare outputs from both models. If outputs differ, cleanly extract the JSON and log the mismatched payloads.
+
+### Engineering Expectations
+
+- **Architecture Flow Diagram**: Map the API layer, synchronous return path, and the decoupled background context.
+- **Context Management**: Demonstrate that latency or failure in the background Candidate model does not affect the Primary response.
+- **Testing**: Write unit tests for JSON extraction/comparison. Add integration tests to verify the primary response remains fast.
+- **CI/CD**: Provide a basic GitHub Actions pipeline.
+- **Documentation**: Cover setup in the README and explain how the background task is decoupled.
+
+### Extensions & Next Steps
+
+- **Metrics Endpoint**: Expose a `/metrics` endpoint to show real-time match rate percentage.
+
 Client sends a prompt and **immediately** gets a **Mock LLM response** (the stand-in "production" model). A **shadow candidate model** — generated via **DigitalOcean Serverless Inference** — then runs **asynchronously in the background**. Both outputs are logged into an **evaluation session** that is retrieved via a **separate endpoint**.
 
 The client never waits on (and never sees) the candidate in the first call — the shadow runs "in the dark" and can never add latency to or break the primary response.
+
+---
+
+## Quickstart
+
+### 1. Get a model access key
+
+In the [DigitalOcean Control Panel](https://cloud.digitalocean.com/): **Inference → Model Access Keys** → create a key (`sk-do-...` or `doo_v1_...`).
+
+### 2. Configure environment
+
+```bash
+cp .env.example .env
+# Edit .env — set MODEL_ACCESS_KEY
+```
+
+### 3. Run locally
+
+**Docker (recommended — no venv needed):**
+
+```bash
+docker compose up --build
+```
+
+**Or with Python venv:**
+
+```bash
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+fastapi dev app/main.py --port 8000
+```
+
+Open **http://localhost:8000/docs** (Swagger UI).
+
+### 4. Try the API (Swagger or curl)
+
+**Send a prompt** (instant mock response):
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is a droplet?"}'
+```
+
+**List all sessions:**
+
+```bash
+curl -s http://localhost:8000/api/v1/evaluations
+```
+
+**Get one session** (replace `{session_id}`):
+
+```bash
+curl -s http://localhost:8000/api/v1/evaluations/{session_id}
+```
+
+**Compare mock vs candidate** (after `candidate_status` is `ok`):
+
+```bash
+curl -s http://localhost:8000/api/v1/evaluations/{session_id}/comparison
+```
+
+Wait a few seconds after `/evaluate` before fetching — the candidate runs in the background.
+
+### 5. Run tests
+
+```bash
+pytest -v
+```
+
+Live DO inference test runs only when both `MODEL_ACCESS_KEY` is set and you opt in:
+
+```bash
+RUN_LIVE_INFERENCE=1 pytest -v tests/test_integration_live.py
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:RUN_LIVE_INFERENCE=1; pytest -v tests/test_integration_live.py
+```
+
+### Deploy (DigitalOcean App Platform)
+
+The app spec lives in `.do/app.yaml`. Set `MODEL_ACCESS_KEY` as an encrypted env var in the Control Panel, then deploy. Swagger: `https://<your-app>.ondigitalocean.app/docs`.
 
 ---
 
@@ -299,11 +409,21 @@ README: get a model access key, set `.env`, `curl` both endpoints. Structured lo
 
 ---
 
+## Trade-offs & design decisions
+
+- **Primary model is a mock**, not a real production LLM — proves the async shadow path and log-and-retrieve flow without coupling to a specific production model.
+- **In-memory sessions + BackgroundTasks** — fast to build; sessions and in-flight shadow jobs are lost on restart. Production would use a durable queue (Redis/RabbitMQ) and Postgres.
+- **Mismatch handling** — when mock and candidate text differ, a structured warning is logged (`shadow output mismatch`) with both JSON payloads; comparison details are available via `GET /evaluations/{id}/comparison`.
+- **No auth/rate-limiting** on API endpoints — acceptable for a POC; add at the gateway in production.
+
+---
+
 ## Good to have (if time permits)
+
 - **Durable async:** replace in-process `BackgroundTasks` with a queue (Redis/RabbitMQ) + worker so shadow jobs survive pod restarts.
 - **Persistence:** store sessions in Postgres instead of memory (survives restart, queryable history).
-- **Scoring/comparison:** compute a diff/score between mock and candidate (latency, token cost, similarity, LLM-as-judge) and expose it on the session.
-- **List/filter endpoint:** `GET /evaluations` with pagination for a dashboard.
+- **Metrics endpoint:** `GET /metrics` with real-time match rate percentage.
+- **List/filter pagination:** extend `GET /evaluations` with pagination for a dashboard.
 - **Streaming & batch:** `stream=True` for long candidate outputs; batch inference for offline backfills.
 - **Dedicated deployment:** point the same `base_url` config at a dedicated GPU deployment once volume justifies always-on capacity.
 

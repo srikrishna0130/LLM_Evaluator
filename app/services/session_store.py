@@ -53,7 +53,7 @@ class SessionStore:
                 session.model_copy()
                 for session in sorted(
                     self._sessions.values(),
-                    key=lambda s: s.created_at,
+                    key=lambda s: (s.created_at, s.session_id),
                     reverse=True,
                 )
             ]

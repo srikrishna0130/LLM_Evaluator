@@ -98,6 +98,20 @@ async def test_get_returns_copy_not_live_reference():
 
 
 @pytest.mark.asyncio
+async def test_list_all_returns_newest_first():
+    store = SessionStore()
+    first_id = await store.create("first", MOCK)
+    await asyncio.sleep(0.01)
+    second_id = await store.create("second", MOCK)
+
+    sessions = await store.list_all()
+
+    assert len(sessions) == 2
+    assert sessions[0].session_id == second_id
+    assert sessions[1].session_id == first_id
+
+
+@pytest.mark.asyncio
 async def test_concurrent_set_candidate():
     """Multiple background tasks can update different sessions safely."""
     store = SessionStore()
