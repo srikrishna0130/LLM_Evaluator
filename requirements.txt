@@ -2,6 +2,7 @@ fastapi[standard]
 pydantic
 pydantic-settings
 python-json-logger
+openai
 pytest
 pytest-asyncio
 httpx
