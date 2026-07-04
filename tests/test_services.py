@@ -1,5 +1,6 @@
 import pytest
 
+from app.schemas.model import ModelGenerationResponse, TokenUsage
 from app.services.base import BaseModelClient
 from app.services.candidate_model import CandidateModelClient
 from app.services.mock_model import MockModelClient
@@ -22,7 +23,9 @@ async def test_mock_model_generate():
     """Mock model echoes the prompt with a stable shape."""
     result = await MockModelClient().generate("hello world")
 
-    assert result == {"text": "[mock] echo: hello world", "model": "mock-llm-v0"}
+    assert result == ModelGenerationResponse(
+        text="[mock] echo: hello world", model="mock-llm-v0"
+    )
 
 
 class _FakeMessage:
@@ -83,12 +86,14 @@ async def test_candidate_generate_shape(monkeypatch):
 
     result = await client.generate("ping")
 
-    assert result["text"] == "candidate says hi"
-    assert result["usage"] == {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8}
-    assert isinstance(result["latency_ms"], float)
-    assert result["latency_ms"] >= 0
+    assert result.text == "candidate says hi"
+    assert result.usage == TokenUsage(
+        prompt_tokens=3, completion_tokens=5, total_tokens=8
+    )
+    assert isinstance(result.latency_ms, float)
+    assert result.latency_ms >= 0
     # The configured candidate model id is forwarded to the SDK.
-    assert recorder["model"] == result["model"]
+    assert recorder["model"] == result.model
     assert recorder["messages"] == [{"role": "user", "content": "ping"}]
 
 

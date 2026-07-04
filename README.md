@@ -34,6 +34,142 @@ GET /evaluations/{session_id}
 
 ---
 
+## Schemas
+
+All request/response shapes are defined as Pydantic models under `app/schemas/`. The mock and candidate clients both return the same normalized response type; the session store persists typed `EvaluationSession` records.
+
+### Model API call (DigitalOcean Serverless Inference)
+
+Sent to `POST https://inference.do-ai.run/v1/chat/completions` (OpenAI-compatible).
+
+**Pydantic:** `ModelCompletionRequest`, `ChatMessage` (`app/schemas/model.py`)
+
+```json
+{
+  "model": "openai-gpt-5-mini",
+  "messages": [
+    { "role": "user", "content": "your prompt here" }
+  ]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `model` | `string` | Model id from the DO catalog (e.g. `openai-gpt-5-mini`) |
+| `messages` | `array` | Chat messages; POC uses a single user message |
+| `messages[].role` | `"user" \| "assistant" \| "system"` | Message role |
+| `messages[].content` | `string` | Message text (min length 1) |
+
+Built in code via `ModelCompletionRequest.from_prompt(model, prompt)`.
+
+### Model generation response (mock + candidate)
+
+Both `MockModelClient` and `CandidateModelClient` return this shape.
+
+**Pydantic:** `ModelGenerationResponse`, `TokenUsage` (`app/schemas/model.py`)
+
+```json
+{
+  "text": "generated text",
+  "model": "openai-gpt-5-mini",
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 20,
+    "total_tokens": 30
+  },
+  "latency_ms": 842.5
+}
+```
+
+| Field | Type | Mock | Candidate | Description |
+|---|---|---|---|---|
+| `text` | `string` | ✓ | ✓ | Generated response text |
+| `model` | `string` | ✓ | ✓ | Model id that produced the response |
+| `usage` | `TokenUsage \| null` | `null` | populated | Token counts from the provider |
+| `usage.prompt_tokens` | `int` | — | ✓ | Input tokens |
+| `usage.completion_tokens` | `int` | — | ✓ | Output tokens |
+| `usage.total_tokens` | `int` | — | ✓ | Total tokens |
+| `latency_ms` | `float \| null` | `null` | populated | Round-trip latency in milliseconds |
+
+**Mock example** (instant, no network):
+
+```json
+{
+  "text": "[mock] echo: hello",
+  "model": "mock-llm-v0",
+  "usage": null,
+  "latency_ms": null
+}
+```
+
+**Candidate example** (from DO Serverless Inference):
+
+```json
+{
+  "text": "Hello! How can I help you today?",
+  "model": "openai-gpt-5-mini",
+  "usage": { "prompt_tokens": 3, "completion_tokens": 12, "total_tokens": 15 },
+  "latency_ms": 1240.5
+}
+```
+
+### Evaluation session (session store)
+
+Stored in memory by `SessionStore` (`app/services/session_store.py`).
+
+**Pydantic:** `EvaluationSession`, `CandidateStatus` (`app/schemas/session.py`)
+
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "prompt": "hello",
+  "mock": {
+    "text": "[mock] echo: hello",
+    "model": "mock-llm-v0",
+    "usage": null,
+    "latency_ms": null
+  },
+  "candidate": null,
+  "candidate_status": "pending",
+  "error": null,
+  "created_at": "2026-07-04T10:00:00+00:00",
+  "updated_at": "2026-07-04T10:00:00+00:00"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | `string` | UUID for this evaluation |
+| `prompt` | `string` | Original user prompt |
+| `mock` | `ModelGenerationResponse` | Instant primary response |
+| `candidate` | `ModelGenerationResponse \| null` | Shadow response once complete |
+| `candidate_status` | `"pending" \| "ok" \| "failed"` | Shadow task state |
+| `error` | `string \| null` | Error message when `candidate_status` is `failed` |
+| `created_at` | `datetime` | Session creation time (UTC) |
+| `updated_at` | `datetime` | Last update time (UTC) |
+
+**After shadow completes (`candidate_status: ok`):**
+
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "prompt": "hello",
+  "mock": { "text": "[mock] echo: hello", "model": "mock-llm-v0", "usage": null, "latency_ms": null },
+  "candidate": {
+    "text": "Hello! How can I help you today?",
+    "model": "openai-gpt-5-mini",
+    "usage": { "prompt_tokens": 3, "completion_tokens": 12, "total_tokens": 15 },
+    "latency_ms": 1240.5
+  },
+  "candidate_status": "ok",
+  "error": null,
+  "created_at": "2026-07-04T10:00:00+00:00",
+  "updated_at": "2026-07-04T10:00:02+00:00"
+}
+```
+
+---
+
 ## How background tasks are handled (and their limits)
 
 The POC uses **FastAPI's built-in `BackgroundTasks`** — no external queue or worker. The `/evaluate` route builds the mock response, creates the session, registers the shadow call, and returns; Starlette runs the registered task *after* the response is flushed.
@@ -137,7 +273,7 @@ class CandidateModelClient:
 ```
 
 ### Step 3 — Session store (~15 min)
-An in-memory, thread-safe store keyed by `session_id` (a `dict` + `asyncio.Lock` is fine for the POC). Records: `prompt`, `mock`, `candidate`, `candidate_status` (`pending|ok|failed`), timestamps. Swappable for Postgres later (see "good to have").
+An in-memory, thread-safe store keyed by `session_id` (a `dict` + `asyncio.Lock` is fine for the POC). Records are typed as `EvaluationSession` (`app/schemas/session.py`) with `prompt`, `mock`, `candidate`, `candidate_status` (`pending|ok|failed`), timestamps. Swappable for Postgres later (see "good to have").
 
 ### Step 4 — Endpoints + background shadow (~35 min)
 - Instantiate `MockModelClient` and `CandidateModelClient` once in the `lifespan` handler (`app/main.py`), store on `app.state` (reuse the candidate connection pool; close on shutdown).

@@ -7,16 +7,14 @@ API (and swap in fakes) regardless of the concrete backend.
 
 from abc import ABC, abstractmethod
 
+from app.schemas.model import ModelGenerationResponse
+
 
 class BaseModelClient(ABC):
-    """Abstract async client returning a normalized generation result.
-
-    Implementations return a ``dict`` with at least ``text`` and ``model`` keys;
-    the candidate additionally includes ``usage`` and ``latency_ms``.
-    """
+    """Abstract async client returning a normalized generation result."""
 
     @abstractmethod
-    async def generate(self, prompt: str) -> dict:
+    async def generate(self, prompt: str) -> ModelGenerationResponse:
         """Generate a response for ``prompt``."""
         raise NotImplementedError
 

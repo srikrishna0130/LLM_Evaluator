@@ -10,6 +10,11 @@ import time
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.schemas.model import (
+    ModelCompletionRequest,
+    ModelGenerationResponse,
+    TokenUsage,
+)
 from app.services.base import BaseModelClient
 
 
@@ -24,19 +29,26 @@ class CandidateModelClient(BaseModelClient):
             max_retries=settings.CANDIDATE_MAX_RETRIES,
         )
 
-    async def generate(self, prompt: str) -> dict:
+    async def generate(self, prompt: str) -> ModelGenerationResponse:
+        request = ModelCompletionRequest.from_prompt(
+            settings.CANDIDATE_MODEL, prompt
+        )
         start = time.perf_counter()
         resp = await self._client.chat.completions.create(
-            model=settings.CANDIDATE_MODEL,
-            messages=[{"role": "user", "content": prompt}],
+            **request.to_openai_kwargs()
         )
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
-        return {
-            "text": resp.choices[0].message.content,
-            "model": resp.model,
-            "usage": resp.usage.model_dump() if resp.usage else None,
-            "latency_ms": latency_ms,
-        }
+        usage = (
+            TokenUsage.model_validate(resp.usage.model_dump())
+            if resp.usage
+            else None
+        )
+        return ModelGenerationResponse(
+            text=resp.choices[0].message.content or "",
+            model=resp.model,
+            usage=usage,
+            latency_ms=latency_ms,
+        )
 
     async def aclose(self) -> None:
         """Close the underlying HTTP connection pool (called on shutdown)."""

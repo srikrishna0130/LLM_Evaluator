@@ -6,6 +6,7 @@ against. It implements the async ``BaseModelClient`` contract for a uniform
 interface, even though it does no real awaiting.
 """
 
+from app.schemas.model import ModelGenerationResponse
 from app.services.base import BaseModelClient
 
 
@@ -14,5 +15,8 @@ class MockModelClient(BaseModelClient):
 
     MODEL_NAME = "mock-llm-v0"
 
-    async def generate(self, prompt: str) -> dict:
-        return {"text": f"[mock] echo: {prompt}", "model": self.MODEL_NAME}
+    async def generate(self, prompt: str) -> ModelGenerationResponse:
+        return ModelGenerationResponse(
+            text=f"[mock] echo: {prompt}",
+            model=self.MODEL_NAME,
+        )
