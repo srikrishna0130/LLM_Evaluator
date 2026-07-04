@@ -5,6 +5,9 @@ from app.core.config import settings
 from app.core.logger import setup_logging
 from app.api.router import api_router
 from app.api.errors import register_exception_handlers
+from app.services.candidate_model import CandidateModelClient
+from app.services.mock_model import MockModelClient
+from app.services.session_store import SessionStore
 
 # Setup logging before anything else
 setup_logging()
@@ -14,13 +17,15 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup logic
     log.info(f"Starting {settings.PROJECT_NAME} in {settings.ENVIRONMENT} mode")
-    # Initialize DB connections, background task queues, etc.
-    
+    app.state.mock_model = MockModelClient()
+    app.state.candidate_model = CandidateModelClient()
+    app.state.sessions = SessionStore()
+
     yield
-    
+
     # Shutdown logic (Graceful Shutdown)
     log.info("Shutting down service, cleaning up resources...")
-    # Close DB connections, gracefully stop background tasks, etc.
+    await app.state.candidate_model.aclose()
     log.info("Cleanup complete. Goodbye!")
 
 app = FastAPI(

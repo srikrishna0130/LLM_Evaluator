@@ -46,6 +46,18 @@ class SessionStore:
             record = self._sessions.get(session_id)
             return record.model_copy() if record is not None else None
 
+    async def list_all(self) -> list[EvaluationSession]:
+        """Return all sessions, newest first."""
+        async with self._lock:
+            return [
+                session.model_copy()
+                for session in sorted(
+                    self._sessions.values(),
+                    key=lambda s: s.created_at,
+                    reverse=True,
+                )
+            ]
+
     async def set_candidate(
         self,
         session_id: str,

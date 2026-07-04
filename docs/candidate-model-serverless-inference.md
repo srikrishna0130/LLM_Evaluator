@@ -161,6 +161,26 @@ Register both routes in `app/api/router.py`.
 ### Step 6 — Docs & polish (~10 min)
 README: get a model access key, set `.env`, `curl` both endpoints. Structured log line per shadow run (model id, latency, token usage).
 
+### Step 7 — Error handling & logging (~20 min)
+Wire the evaluator into the frameworks **already in this repo** — don't invent new ones. The pattern is n-tier: the domain/service layer *raises typed exceptions*, the API layer *translates them to clean JSON*, and every layer *logs through the root logger* that writes to `logs/app.log`.
+
+**Error handling (n-tier, reuse `app/core/exceptions.py` + `app/api/errors.py`):**
+- **Domain layer** (`app/core/exceptions.py`): add the evaluator's typed exceptions on top of the existing `DomainException` base. At minimum:
+  - `SessionNotFoundError(ResourceNotFoundError)` — raised by the session store when `session_id` is unknown (maps to the existing 404 handler for free).
+  - `CandidateInferenceError(DomainException)` — raised inside the shadow task when the DO call fails (timeout / 5xx / auth). Carries `message` + optional `code`.
+- **API layer** (`app/api/errors.py`): the existing handlers already cover it — `resource_not_found_handler` (404), `validation_exception_handler` (422 for bad `/evaluate` payloads), and `global_exception_handler` (500, never leaks stack traces). Only register a new handler if `CandidateInferenceError` ever needs to surface on a request path (it normally shouldn't — see below).
+- **Route thinness:** `GET /evaluations/{id}` just does `raise SessionNotFoundError(...)` when the store returns nothing — no manual `JSONResponse`, no `HTTPException`. Let the registered handler format it. `POST /evaluate` validates via the Pydantic request model, so malformed bodies hit the 422 handler automatically.
+- **Contained shadow failures (the important one):** the background `run_shadow` task runs *after* the response is flushed, so an exception there must **never** become a client-facing error. Catch it, log it (with `exc_info=True`), and record `candidate_status: failed` + `error` on the session. This is why the candidate failure path is a *stored state*, not a raised HTTP error.
+
+**Logging (reuse `app/core/logger.py`, writes to `logs/app.log`):**
+- `setup_logging()` is already called in `app/main.py` and configures the root logger with a console handler **and** a `RotatingFileHandler` → `logs/app.log` (10MB × 5 backups; JSON in `production`, readable in `development`). Nothing new to configure — just get a module logger via `log = logging.getLogger(__name__)` in each service/route so records propagate to the root handlers (and thus to the file).
+- **What to log where:**
+  - `POST /evaluate` (INFO): session created — `session_id`, prompt length (not the full prompt at INFO if sensitive), that a shadow was scheduled.
+  - `run_shadow` success (INFO): one structured line per shadow run — `session_id`, `model`, `latency_ms`, token `usage`.
+  - `run_shadow` failure (ERROR, `exc_info=True`): `session_id`, exception type/message — the full traceback lands in `logs/app.log`.
+  - `GET /evaluations/{id}` unknown id (WARNING): handled by the existing `resource_not_found_handler` log line.
+- **Verify:** after a run, `tail -f logs/app.log` should show the request line, the scheduled-shadow line, and the per-shadow result (or the failure traceback). `logs/` is gitignored, so nothing sensitive is committed.
+
 ---
 
 ## Good to have (if time permits)
