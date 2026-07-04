@@ -116,31 +116,442 @@ The app spec lives in `.do/app.yaml`. Set `MODEL_ACCESS_KEY` as an encrypted env
 
 ---
 
-## Flow
+## High-Level Design (HLD)
+
+The system is a **FastAPI proxy** with two decoupled paths:
+
+1. **Synchronous primary path** — `MockModelClient` returns instantly; the client never waits on the candidate.
+2. **Asynchronous shadow path** — `CandidateModelClient` calls DigitalOcean Serverless Inference in a background task after the HTTP response is flushed.
+
+Both outputs are stored in an in-memory `SessionStore` and retrieved later via separate GET endpoints.
+
+### System context
+
+```mermaid
+flowchart TB
+    Client["Client / Swagger UI"]
+    API["FastAPI App\n/api/v1"]
+    Mock["MockModelClient\n(primary — instant)"]
+    Store["SessionStore\n(in-memory)"]
+    Shadow["BackgroundTasks\nrun_shadow()"]
+    Candidate["CandidateModelClient\n(DO Serverless Inference)"]
+    DO["DigitalOcean Inference API\ninference.do-ai.run/v1"]
+
+    Client -->|"POST /evaluate"| API
+    Client -->|"GET /evaluations*"| API
+    API --> Mock
+    API --> Store
+    API -->|"schedule after response"| Shadow
+    Shadow --> Candidate
+    Candidate --> DO
+    Shadow --> Store
+    API --> Store
+```
+
+### Request lifecycle (sequence)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as FastAPI
+    participant M as MockModelClient
+    participant S as SessionStore
+    participant BG as BackgroundTask
+    participant DO as DO Inference
+
+    C->>API: POST /evaluate { prompt }
+    API->>M: generate(prompt)
+    M-->>API: mock response (instant)
+    API->>S: create(session, mock, pending)
+    API-->>C: 200 { session_id, response }
+    Note over C,API: Client is done — no candidate latency
+
+    API->>BG: run_shadow(session_id, prompt)
+    BG->>DO: chat/completions
+    DO-->>BG: candidate text + usage
+    BG->>S: set_candidate(ok)
+    opt texts differ
+        BG->>BG: log mismatch (mock_json vs candidate_json)
+    end
+
+    C->>API: GET /evaluations/{id}/comparison
+    API->>S: get(session_id)
+    S-->>API: EvaluationSession
+    API-->>C: 200 { mock, candidate, text_diff, ... }
+```
+
+### Component responsibilities
+
+| Component | Role |
+|---|---|
+| **API layer** (`app/api/routes/`) | HTTP endpoints, validation, error mapping |
+| **MockModelClient** | Deterministic primary response — zero network I/O |
+| **CandidateModelClient** | Async OpenAI-compatible client → DO Serverless Inference |
+| **SessionStore** | Thread-safe in-memory session persistence (`asyncio.Lock`) |
+| **run_shadow** | Background task — calls candidate, updates session, logs mismatch |
+| **comparison service** | Builds metrics + git-style `text_diff` for finished sessions |
+
+### Key design properties
+
+- **Latency isolation** — candidate failure or slowness never affects `POST /evaluate` (response already sent).
+- **Client disconnect safe** — background tasks run on the server event loop, not tied to the client socket.
+- **Mismatch observability** — differing outputs trigger a structured log warning and are exposed via `/comparison`.
+
+---
+
+## Low-Level Design (LLD)
+
+### Module map
+
+```mermaid
+flowchart LR
+    subgraph api ["app/api"]
+        eval_routes["routes/evaluations.py"]
+        health["routes/health.py"]
+        errors["errors.py"]
+    end
+
+    subgraph schemas ["app/schemas"]
+        model_s["model.py"]
+        session_s["session.py"]
+        eval_s["evaluation.py"]
+    end
+
+    subgraph services ["app/services"]
+        base["base.py\nBaseModelClient"]
+        mock["mock_model.py"]
+        candidate["candidate_model.py"]
+        store["session_store.py"]
+        shadow["shadow.py"]
+        comp["comparison.py"]
+    end
+
+    subgraph core ["app/core"]
+        config["config.py"]
+        logger["logger.py"]
+    end
+
+    eval_routes --> mock
+    eval_routes --> store
+    eval_routes --> shadow
+    eval_routes --> comp
+    eval_routes --> eval_s
+    shadow --> candidate
+    shadow --> store
+    comp --> eval_s
+    mock --> base
+    candidate --> base
+    candidate --> model_s
+    store --> session_s
+    mock --> model_s
+    candidate --> config
+```
+
+### Class contract
+
+```mermaid
+classDiagram
+    class BaseModelClient {
+        <<abstract>>
+        +generate(prompt) ModelGenerationResponse
+        +aclose() void
+    }
+    class MockModelClient {
+        +generate(prompt) ModelGenerationResponse
+    }
+    class CandidateModelClient {
+        -AsyncOpenAI _client
+        +generate(prompt) ModelGenerationResponse
+        +aclose() void
+    }
+    class SessionStore {
+        -dict _sessions
+        -asyncio.Lock _lock
+        +create(prompt, mock) str
+        +get(session_id) EvaluationSession
+        +list_all() list
+        +set_candidate(session_id, candidate, status) void
+    }
+    BaseModelClient <|-- MockModelClient
+    BaseModelClient <|-- CandidateModelClient
+```
+
+### Session state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: POST /evaluate\ncreate session
+    pending --> ok: run_shadow succeeds
+    pending --> failed: run_shadow exception
+    ok --> [*]: GET /comparison available
+    failed --> [*]: error stored on session
+```
+
+### Directory layout
 
 ```
-POST /evaluate  { "prompt": "..." }
-        │
-        ├─ 1. generate Mock LLM response (instant, canned/templated)
-        ├─ 2. create session { id, prompt, mock_response, candidate: pending }
-        ├─ 3. schedule background shadow task
-        └─ 4. return { session_id, response: <mock_response> }   ← client done here
-
-[background]  candidate = DO Serverless Inference(prompt)
-              update session.candidate = { text, latency_ms, usage, status }
-
-GET /evaluations/{session_id}
-        └─ returns BOTH outputs: mock + candidate (+ status/latency/usage)
+app/
+├── api/routes/evaluations.py   # POST /evaluate, GET /evaluations*
+├── core/config.py              # 12-factor settings (MODEL_ACCESS_KEY, etc.)
+├── schemas/
+│   ├── model.py                # ModelCompletionRequest, ModelGenerationResponse
+│   ├── session.py              # EvaluationSession, CandidateStatus
+│   └── evaluation.py           # EvaluateRequest/Response, EvaluationComparison
+├── services/
+│   ├── mock_model.py           # Primary (sync path, no I/O)
+│   ├── candidate_model.py      # Shadow (DO Serverless Inference)
+│   ├── session_store.py        # In-memory store + asyncio.Lock
+│   ├── shadow.py               # Background task + mismatch logging
+│   └── comparison.py           # Metrics + difflib unified diff
+└── main.py                     # Lifespan: wire clients + store on app.state
 ```
 
-**Answering the two design questions from earlier:**
-- *Does the client get the candidate response?* No — only the mock. The candidate is read later via `GET /evaluations/{id}`.
-- *How does the background task survive the client disconnecting?* FastAPI `BackgroundTasks` run **after** the response is flushed, inside the **server's event loop** — they aren't tied to the client socket, so the client can disconnect and the shadow still completes. (In-process only; durability across pod restarts is a "good to have" — see below.)
+### Shadow task pseudocode
 
-### Endpoint & auth (DigitalOcean — the candidate only)
+```
+run_shadow(client, sessions, session_id, prompt):
+    session = await sessions.get(session_id)
+    try:
+        result = await client.generate(prompt)          # network I/O
+        await sessions.set_candidate(id, result, ok)
+        log.info("shadow completed", model, latency_ms, tokens)
+        if result.text != session.mock.text:
+            log.warning("shadow output mismatch", mock_json, candidate_json)
+    except Exception as e:
+        log.exception("shadow failed")
+        await sessions.set_candidate(id, None, failed, error=str(e))
+```
+
+---
+
+## API Reference
+
+Base path: `/api/v1` · Interactive docs: `/docs`
+
+### `GET /health`
+
+**Response `200`**
+
+```json
+{
+  "status": "ok",
+  "message": "Service is healthy"
+}
+```
+
+---
+
+### `POST /evaluate`
+
+Submit a prompt. Returns the **mock response immediately**; candidate runs in background.
+
+**Request**
+
+```json
+{
+  "prompt": "What is a droplet?"
+}
+```
+
+**Response `200`**
+
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "response": "[mock] echo: What is a droplet?"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | `string` | UUID — use to fetch session/comparison later |
+| `response` | `string` | Mock primary text (client-facing) |
+
+**Error `422`** — validation (empty prompt)
+
+```json
+{
+  "error": "Validation Error",
+  "details": [{ "loc": ["body", "prompt"], "msg": "...", "type": "..." }]
+}
+```
+
+---
+
+### `GET /evaluations`
+
+List all stored sessions, **newest first**.
+
+**Response `200`** — array of `EvaluationSession` (see [Schemas](#schemas))
+
+```json
+[
+  {
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "prompt": "What is a droplet?",
+    "mock": { "text": "[mock] echo: What is a droplet?", "model": "mock-llm-v0", "usage": null, "latency_ms": null },
+    "candidate": {
+      "text": "A Droplet is DigitalOcean's scalable virtual machine.",
+      "model": "deepseek-3.2",
+      "usage": { "prompt_tokens": 8, "completion_tokens": 18, "total_tokens": 26 },
+      "latency_ms": 1342.0
+    },
+    "candidate_status": "ok",
+    "error": null,
+    "created_at": "2026-07-04T10:00:00+00:00",
+    "updated_at": "2026-07-04T10:00:02+00:00"
+  }
+]
+```
+
+---
+
+### `GET /evaluations/{session_id}`
+
+Fetch a single session. Candidate may still be `pending` if shadow hasn't finished.
+
+**Response `200` (pending)**
+
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "prompt": "What is a droplet?",
+  "mock": { "text": "[mock] echo: What is a droplet?", "model": "mock-llm-v0", "usage": null, "latency_ms": null },
+  "candidate": null,
+  "candidate_status": "pending",
+  "error": null,
+  "created_at": "2026-07-04T10:00:00+00:00",
+  "updated_at": "2026-07-04T10:00:00+00:00"
+}
+```
+
+**Response `200` (failed candidate)**
+
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "prompt": "What is a droplet?",
+  "mock": { "text": "[mock] echo: What is a droplet?", "model": "mock-llm-v0", "usage": null, "latency_ms": null },
+  "candidate": null,
+  "candidate_status": "failed",
+  "error": "Error code: 403 - model not available for your subscription tier",
+  "created_at": "2026-07-04T10:00:00+00:00",
+  "updated_at": "2026-07-04T10:00:01+00:00"
+}
+```
+
+**Error `404`**
+
+```json
+{
+  "error": "Not Found",
+  "message": "Evaluation session 'unknown-id' not found."
+}
+```
+
+---
+
+### `GET /evaluations/{session_id}/comparison`
+
+Mock-vs-candidate comparison. Only available when `candidate_status` is `"ok"`.
+
+**Response `200`**
+
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "prompt": "What is a droplet?",
+  "mock": {
+    "text": "[mock] echo: What is a droplet?",
+    "model": "mock-llm-v0",
+    "usage": null,
+    "latency_ms": null
+  },
+  "candidate": {
+    "text": "A Droplet is DigitalOcean's scalable virtual machine.",
+    "model": "deepseek-3.2",
+    "usage": { "prompt_tokens": 8, "completion_tokens": 18, "total_tokens": 26 },
+    "latency_ms": 1342.0
+  },
+  "comparison": {
+    "text_match": false,
+    "mock_length": 33,
+    "candidate_length": 52,
+    "latency_ms": 1342.0,
+    "prompt_tokens": 8,
+    "completion_tokens": 18,
+    "total_tokens": 26,
+    "text_diff": "--- mock\n+++ candidate\n@@ -1 +1 @@\n-[mock] echo: What is a droplet?\n+A Droplet is DigitalOcean's scalable virtual machine."
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `comparison.text_match` | `boolean` | `true` if mock and candidate text are identical |
+| `comparison.text_diff` | `string \| null` | Git-style unified diff when texts differ; `null` when they match |
+| `comparison.latency_ms` | `float` | Candidate round-trip latency |
+| `comparison.*_tokens` | `int` | Token usage from candidate inference |
+
+**Error `409`** — candidate not ready
+
+```json
+{
+  "detail": {
+    "error": "Conflict",
+    "message": "Comparison not available while candidate_status is 'pending'.",
+    "candidate_status": "pending"
+  }
+}
+```
+
+---
+
+## Comparison & git-style diff example
+
+When mock and candidate outputs differ, two things happen:
+
+1. **Runtime log** (server-side, `logs/app.log`):
+
+```
+WARNING - shadow output mismatch session_id=550e8400-... mock_json={"text":"[mock] echo: What is a droplet?","model":"mock-llm-v0",...} candidate_json={"text":"A Droplet is DigitalOcean's scalable virtual machine.",...}
+```
+
+2. **API diff** (`comparison.text_diff`) — unified diff format (same as `git diff`):
+
+```diff
+--- mock
++++ candidate
+@@ -1 +1 @@
+-[mock] echo: What is a droplet?
++A Droplet is DigitalOcean's scalable virtual machine.
+```
+
+For multiline responses, the diff shows only changed lines with context:
+
+```diff
+--- mock
++++ candidate
+@@ -1,3 +1,3 @@
+ line one (unchanged)
+-beta line from mock
++BETA line from candidate
+ line three (unchanged)
+```
+
+When texts **match**, `text_diff` is `null` and no mismatch warning is logged.
+
+---
+
+### DigitalOcean candidate inference (external API)
+
 - Base URL: `https://inference.do-ai.run/v1`
-- Auth: `Authorization: Bearer <MODEL_ACCESS_KEY>` — a `sk-do-...` model access key from the Control Panel under **Inference → Model Access Keys**.
-- Model id: any value from `GET /v1/models` (e.g. `openai-gpt-5-mini` or `openai-gpt-5`).
+- Auth: `Authorization: Bearer <MODEL_ACCESS_KEY>` — create under **Inference → Model Access Keys**
+- Model id: any value from `GET /v1/models` (default: `deepseek-3.2`)
+
+**Design FAQ**
+- *Does the client get the candidate response on POST /evaluate?* No — only the mock. Fetch candidate later via `GET /evaluations/{id}`.
+- *Does client disconnect cancel the shadow?* No — `BackgroundTasks` run after the response is flushed on the server event loop.
 
 ---
 
@@ -156,7 +567,7 @@ Sent to `POST https://inference.do-ai.run/v1/chat/completions` (OpenAI-compatibl
 
 ```json
 {
-  "model": "openai-gpt-5-mini",
+  "model": "deepseek-3.2",
   "messages": [
     { "role": "user", "content": "your prompt here" }
   ]
@@ -165,7 +576,7 @@ Sent to `POST https://inference.do-ai.run/v1/chat/completions` (OpenAI-compatibl
 
 | Field | Type | Description |
 |---|---|---|
-| `model` | `string` | Model id from the DO catalog (e.g. `openai-gpt-5-mini`) |
+| `model` | `string` | Model id from the DO catalog (e.g. `deepseek-3.2`) |
 | `messages` | `array` | Chat messages; POC uses a single user message |
 | `messages[].role` | `"user" \| "assistant" \| "system"` | Message role |
 | `messages[].content` | `string` | Message text (min length 1) |
@@ -181,7 +592,7 @@ Both `MockModelClient` and `CandidateModelClient` return this shape.
 ```json
 {
   "text": "generated text",
-  "model": "openai-gpt-5-mini",
+  "model": "deepseek-3.2",
   "usage": {
     "prompt_tokens": 10,
     "completion_tokens": 20,
@@ -217,7 +628,7 @@ Both `MockModelClient` and `CandidateModelClient` return this shape.
 ```json
 {
   "text": "Hello! How can I help you today?",
-  "model": "openai-gpt-5-mini",
+  "model": "deepseek-3.2",
   "usage": { "prompt_tokens": 3, "completion_tokens": 12, "total_tokens": 15 },
   "latency_ms": 1240.5
 }
@@ -267,7 +678,7 @@ Stored in memory by `SessionStore` (`app/services/session_store.py`).
   "mock": { "text": "[mock] echo: hello", "model": "mock-llm-v0", "usage": null, "latency_ms": null },
   "candidate": {
     "text": "Hello! How can I help you today?",
-    "model": "openai-gpt-5-mini",
+    "model": "deepseek-3.2",
     "usage": { "prompt_tokens": 3, "completion_tokens": 12, "total_tokens": 15 },
     "latency_ms": 1240.5
   },
@@ -336,7 +747,7 @@ class Settings(BaseSettings):
 
     # Candidate (shadow) model — serverless inference
     CANDIDATE_BASE_URL: str = "https://inference.do-ai.run/v1"
-    CANDIDATE_MODEL: str = "openai-gpt-5-mini"
+    CANDIDATE_MODEL: str = "deepseek-3.2"
     MODEL_ACCESS_KEY: str = ""          # secret, from env only
     CANDIDATE_TIMEOUT_S: float = 30.0
     CANDIDATE_MAX_RETRIES: int = 2

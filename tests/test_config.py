@@ -6,7 +6,7 @@ def test_candidate_defaults():
     s = Settings(_env_file=None)  # ignore .env so we assert code defaults
 
     assert s.CANDIDATE_BASE_URL == "https://inference.do-ai.run/v1"
-    assert s.CANDIDATE_MODEL == "openai-gpt-5-mini"
+    assert s.CANDIDATE_MODEL == "deepseek-3.2"
     assert s.MODEL_ACCESS_KEY == ""  # secret must come from env, never hardcoded
     assert s.CANDIDATE_TIMEOUT_S == 30.0
     assert s.CANDIDATE_MAX_RETRIES == 2

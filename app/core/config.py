@@ -11,9 +11,9 @@ class Settings(BaseSettings):
     # DATABASE_URL: str
 
     # Candidate (shadow) model — DigitalOcean Serverless Inference
-    # Model IDs from DO catalog: "openai-gpt-5-mini" (fast/cheap) or "openai-gpt-5".
+    # Model IDs from DO catalog — default: deepseek-3.2 (verify via GET /v1/models).
     CANDIDATE_BASE_URL: str = "https://inference.do-ai.run/v1"
-    CANDIDATE_MODEL: str = "openai-gpt-5-mini"
+    CANDIDATE_MODEL: str = "deepseek-3.2"
     MODEL_ACCESS_KEY: str = ""  # secret, from env only (sk-do-... / doo_v1_...)
     CANDIDATE_TIMEOUT_S: float = 30.0
     CANDIDATE_MAX_RETRIES: int = 2
