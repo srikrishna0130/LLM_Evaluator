@@ -47,9 +47,8 @@ coverage.xml
 # Logs
 logs/
 *.log
+*.db
+*.db-shm
+*.db-wal
 
 # Docker
-.dockerignore
-
-# Personal notes (private, not part of the deliverable)
-notes/

@@ -1,24 +1,59 @@
-version: '3.8'
+x-app-environment: &app-environment
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://evaluator:evaluator@db:5432/evaluator}
+  SAMPLE_RATE: ${SAMPLE_RATE:-1.0}
+  QUEUE_BACKEND: ${QUEUE_BACKEND:-database}
+  QUEUE_VISIBILITY_SECONDS: ${QUEUE_VISIBILITY_SECONDS:-120}
+  QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-3}
+  PRIMARY_PROVIDER: ${PRIMARY_PROVIDER:-mock}
+  PRIMARY_BASE_URL: ${PRIMARY_BASE_URL:-}
+  PRIMARY_API_KEY: ${PRIMARY_API_KEY:-}
+  PRIMARY_MODEL: ${PRIMARY_MODEL:-primary-mock}
+  CANDIDATE_PROVIDER: ${CANDIDATE_PROVIDER:-mock}
+  CANDIDATE_BASE_URL: ${CANDIDATE_BASE_URL:-}
+  CANDIDATE_API_KEY: ${CANDIDATE_API_KEY:-}
+  CANDIDATE_MODEL: ${CANDIDATE_MODEL:-candidate-mock}
+  LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+  SCORE_BACKEND: ${SCORE_BACKEND:-heuristic}
+  JUDGE_BASE_URL: ${JUDGE_BASE_URL:-}
+  JUDGE_API_KEY: ${JUDGE_API_KEY:-}
+  JUDGE_MODEL: ${JUDGE_MODEL:-}
+  AWS_REGION: ${AWS_REGION:-}
+  SQS_QUEUE_URL: ${SQS_QUEUE_URL:-}
+  AZURE_SERVICE_BUS_CONNECTION_STRING: ${AZURE_SERVICE_BUS_CONNECTION_STRING:-}
+  AZURE_SERVICE_BUS_QUEUE_NAME: ${AZURE_SERVICE_BUS_QUEUE_NAME:-}
 
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: evaluator
+      POSTGRES_PASSWORD: evaluator
+      POSTGRES_DB: evaluator
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evaluator"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - evaluator-data:/var/lib/postgresql/data
+
   api:
     build: .
+    environment: *app-environment
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "8000:8000"
-    environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
-    env_file:
-      - .env
-    volumes:
-      - ./app:/app/app
-    # Add depends_on if adding a database
-    
-  # db:
-  #   image: postgres:15
-  #   environment:
-  #     POSTGRES_USER: user
-  #     POSTGRES_PASSWORD: password
-  #     POSTGRES_DB: appdb
-  #   ports:
-  #     - "5432:5432"
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment: *app-environment
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  evaluator-data:

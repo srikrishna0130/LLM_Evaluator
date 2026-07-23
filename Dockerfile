@@ -1,22 +1,20 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     ENVIRONMENT=production
 
-# Install dependencies
+WORKDIR /app
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt \
+    && addgroup --system app \
+    && adduser --system --ingroup app app
 
-# Copy application code
-COPY ./app ./app
+COPY --chown=app:app app ./app
 
-# Expose port
+USER app
 EXPOSE 8000
 
-# Command to run
-CMD ["fastapi", "run", "app/main.py", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
