@@ -34,6 +34,10 @@ Docker Compose starts PostgreSQL, the API, and one worker:
 docker compose up --build
 ```
 
+Open the dashboard at <http://localhost:8000>. It can submit prompts, follow
+sampled evaluations, and show recent scores. Swagger remains available at
+<http://localhost:8000/docs>.
+
 The default uses deterministic mock models and samples every request. Try it:
 
 ```bash
@@ -58,8 +62,6 @@ curl http://localhost:8000/api/v1/evaluations/{evaluation_id}
 curl http://localhost:8000/api/v1/evaluations/{evaluation_id}/comparison
 curl http://localhost:8000/api/v1/metrics
 ```
-
-Swagger is available at <http://localhost:8000/docs>.
 
 ## Use real models
 

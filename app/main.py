@@ -2,8 +2,11 @@ import logging
 import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import Settings, get_settings
 from app.database import (
@@ -22,6 +25,7 @@ from app.llm import LLM, build_llm
 from app.observability import configure_logging
 
 log = logging.getLogger(__name__)
+STATIC_DIR = Path(__file__).with_name("static")
 
 
 @dataclass
@@ -61,6 +65,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+    application.mount(
+        "/static",
+        StaticFiles(directory=STATIC_DIR),
+        name="static",
+    )
+
+    @application.get("/", include_in_schema=False)
+    async def dashboard() -> FileResponse:
+        return FileResponse(STATIC_DIR / "index.html")
 
     @application.get("/api/v1/health")
     async def health(request: Request) -> dict[str, str]:

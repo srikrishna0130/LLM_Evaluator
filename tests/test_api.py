@@ -5,6 +5,23 @@ from app.main import create_app
 
 
 @pytest.mark.asyncio
+async def test_dashboard_and_assets_are_served(client):
+    dashboard = await client.get("/")
+    stylesheet = await client.get("/static/app.css")
+    script = await client.get("/static/app.js")
+
+    assert dashboard.status_code == 200
+    assert dashboard.headers["content-type"].startswith("text/html")
+    assert "<title>LLM evaluator</title>" in dashboard.text
+    assert stylesheet.status_code == 200
+    assert "--accent: #245c46" in stylesheet.text
+    assert script.status_code == 200
+    assert 'request("/api/v1/evaluate"' in script.text
+    assert "pollGeneration" in script.text
+    assert "if (response.sampled)" in script.text
+
+
+@pytest.mark.asyncio
 async def test_primary_response_is_returned_and_sampled(client):
     response = await client.post(
         "/api/v1/evaluate", json={"prompt": "hello"}
