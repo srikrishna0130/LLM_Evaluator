@@ -186,7 +186,7 @@ and alert on `failed` evaluations and outbox backlog.
 ## Tests
 
 ```bash
-pytest -q
+python -m pytest -q
 ```
 
 Tests cover sampling isolation, persistence, outbox behavior, worker stage

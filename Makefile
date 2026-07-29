@@ -7,7 +7,7 @@ worker:
 	python -m app.worker
 
 test:
-	pytest -q
+	python -m pytest -q
 
 docker:
 	docker compose up --build
