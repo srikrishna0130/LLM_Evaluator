@@ -15,8 +15,12 @@ async def test_dashboard_and_assets_are_served(client):
     assert "<title>LLM evaluator</title>" in dashboard.text
     assert stylesheet.status_code == 200
     assert "--accent: #245c46" in stylesheet.text
+    assert "width: calc(100% - 20px)" in stylesheet.text
     assert script.status_code == 200
     assert 'request("/api/v1/evaluate"' in script.text
+    assert "const text = await response.text()" in script.text
+    assert "result.hidden = true" in script.text
+    assert "Retrying…" in script.text
     assert "pollGeneration" in script.text
     assert "if (response.sampled)" in script.text
 

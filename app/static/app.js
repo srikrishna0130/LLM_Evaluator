@@ -23,10 +23,24 @@ let pollGeneration = 0;
 
 async function request(path, options = {}) {
   const response = await fetch(path, options);
-  const body = await response.json();
+  const text = await response.text();
+  let body = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+
   if (!response.ok) {
-    const message =
-      typeof body.detail === "string" ? body.detail : "Request failed.";
+    const detail =
+      body && typeof body === "object" ? body.detail : null;
+    const message = typeof detail === "string"
+      ? detail
+      : typeof body === "string" && body.trim()
+        ? body.trim()
+        : `Request failed (${response.status}).`;
     throw new Error(message);
   }
   return body;
@@ -58,6 +72,11 @@ function setStatus(status) {
 function resetResult() {
   clearTimeout(pollTimeout);
   pollGeneration += 1;
+  result.hidden = true;
+  evaluationStatus.textContent = "";
+  evaluationStatus.className = "status";
+  primaryModel.textContent = "";
+  primaryResponse.textContent = "";
   candidateResult.hidden = true;
   responseGrid.classList.add("single");
   scoreResult.hidden = true;
@@ -110,8 +129,7 @@ async function pollEvaluation(evaluationId, generation, attempt = 0) {
     if (generation !== pollGeneration) {
       return;
     }
-    setFormStatus(error.message, true);
-    return;
+    setFormStatus(`${error.message} Retrying…`, true);
   }
 
   if (attempt < 120) {

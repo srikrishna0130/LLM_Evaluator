@@ -365,7 +365,7 @@ footer {
 
 @media (max-width: 720px) {
   .page-width {
-    width: min(100% - 20px, 1080px);
+    width: calc(100% - 20px);
   }
 
   .panel {
