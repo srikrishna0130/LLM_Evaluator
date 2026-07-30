@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Submit and review shadow model evaluations.">
+    <title>LLM evaluator</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="page-width header-inner">
+        <div>
+          <p class="eyebrow">Model operations</p>
+          <h1>LLM evaluator</h1>
+        </div>
+        <nav aria-label="Utility links">
+          <a href="/docs">API docs</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="page-width">
+      <section class="panel" aria-labelledby="new-evaluation-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="new-evaluation-heading">New evaluation</h2>
+            <p>Send a prompt to the primary model and, when sampled, compare it with the candidate.</p>
+          </div>
+        </div>
+
+        <form id="evaluation-form">
+          <label for="prompt">Prompt</label>
+          <textarea
+            id="prompt"
+            name="prompt"
+            rows="5"
+            maxlength="32000"
+            placeholder="Enter a prompt to evaluate"
+            required
+          ></textarea>
+          <div class="form-row">
+            <button id="submit-button" type="submit">Run evaluation</button>
+            <p id="form-status" class="muted" role="status" aria-live="polite"></p>
+          </div>
+        </form>
+
+        <div id="result" class="result" hidden>
+          <div class="result-heading">
+            <h3>Result</h3>
+            <span id="evaluation-status" class="status"></span>
+          </div>
+
+          <div id="response-grid" class="response-grid single">
+            <article>
+              <div class="response-heading">
+                <h4>Primary</h4>
+                <span id="primary-model" class="model-name"></span>
+              </div>
+              <pre id="primary-response"></pre>
+            </article>
+            <article id="candidate-result" hidden>
+              <div class="response-heading">
+                <h4>Candidate</h4>
+                <span id="candidate-model" class="model-name"></span>
+              </div>
+              <pre id="candidate-response"></pre>
+            </article>
+          </div>
+
+          <div id="score-result" class="score-row" hidden>
+            <div>
+              <span class="label">Comparison score</span>
+              <strong id="score"></strong>
+            </div>
+            <p id="score-reason"></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="overview-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="overview-heading">Overview</h2>
+            <p>Current totals from stored evaluations.</p>
+          </div>
+          <button id="refresh-button" class="secondary" type="button">Refresh</button>
+        </div>
+
+        <dl class="metrics">
+          <div>
+            <dt>Total</dt>
+            <dd id="metric-total">—</dd>
+          </div>
+          <div>
+            <dt>Completed</dt>
+            <dd id="metric-completed">—</dd>
+          </div>
+          <div>
+            <dt>Failed</dt>
+            <dd id="metric-failed">—</dd>
+          </div>
+          <div>
+            <dt>Average score</dt>
+            <dd id="metric-average">—</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="panel" aria-labelledby="recent-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="recent-heading">Recent evaluations</h2>
+            <p>The latest 20 sampled requests.</p>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Prompt</th>
+                <th scope="col">Status</th>
+                <th scope="col">Models</th>
+                <th scope="col">Score</th>
+                <th scope="col">Created</th>
+              </tr>
+            </thead>
+            <tbody id="evaluations-body"></tbody>
+          </table>
+          <p id="evaluations-empty" class="empty-state" hidden>No evaluations yet.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="page-width">
+      <span>LLM evaluator</span>
+      <span id="last-updated"></span>
+    </footer>
+  </body>
+</html>
