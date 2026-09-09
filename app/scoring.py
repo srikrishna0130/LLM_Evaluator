@@ -94,17 +94,17 @@ class LLMJudgeScorer:
         judge_prompt = (
             "User prompt:\n"
             f"{prompt[:self._max_chars]}\n\n"
-            "Reference response:\n"
+            "Primary response:\n"
             f"{primary.text[:self._max_chars]}\n\n"
             "Candidate response:\n"
             f"{candidate.text[:self._max_chars]}\n\n"
-            'Return JSON only: {"score": 0-100, "reason": "short reason"}.'
+            'Return JSON only: {"score": 0-100, "reason": "short reason"} where "score" reflects the RELEVANCE of the primary compared to the candidate.'
         )
         output = await self._judge.generate(
             judge_prompt,
             system=(
-                "You are a strict response evaluator. Score correctness, "
-                "relevance, and completeness against the reference."
+                "You are a strict response evaluator. Score ONLY the RELEVANCE of the primary response compared to the candidate. "
+                "Ignore style and length differences. Return JSON only as instructed in the user message."
             ),
             temperature=0,
         )

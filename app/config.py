@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "LLM Shadow Evaluator"
+    app_name: str = "LLM Evaluator"
     environment: str = "development"
     log_level: str = "INFO"
 
