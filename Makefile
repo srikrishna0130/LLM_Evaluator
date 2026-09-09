@@ -1,4 +1,7 @@
-.PHONY: run worker test docker
+.PHONY: dev run worker test docker
+
+dev:
+	python run.py
 
 run:
 	uvicorn app.main:app --reload --port 8000

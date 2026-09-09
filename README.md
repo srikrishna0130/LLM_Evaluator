@@ -1,195 +1,245 @@
-# LLM Shadow Evaluator
+# 🎯 LLM Evaluator
 
-A small production-oriented service for evaluating a candidate LLM without
-putting it on the customer request path.
+> **Safely evaluate new, cheaper, or fine-tuned LLMs on live production traffic with automated scoring — with zero added latency for your users.**
 
-1. `POST /evaluate` calls the **primary** model and returns its response.
-2. A configurable percentage of responses is stored with a **shadow** job.
-3. A separate worker calls the candidate model.
-4. The worker creates a separate **score** job and stores a `0-100` comparison.
+---
+
+## 💡 What is this for?
+
+Switching Large Language Models (LLMs) in production is stressful:
+
+* You want to switch from an expensive model (e.g. GPT-4o) to a faster, cheaper alternative (e.g. Claude Haiku, Gemini Flash, or a self-hosted Llama 3).
+* You want to benchmark a new prompt template, system prompt, or fine-tuned model against your existing setup.
+* But **offline benchmarks don't reflect real user behavior**, and testing directly in production risks breaking user experience, degrading output quality, or introducing hallucinations.
+
+### The Solution: Shadow Evaluation (Dark Traffic)
+
+**LLM Evaluator** acts as a safety shield. It uses **shadow evaluation** to benchmark models safely in the background:
+
+```
+[ User Request ]
+       │
+       ▼
+ ┌─────────────┐
+ │ Primary LLM │ ──────► Instant Response back to User (Zero Latency Penalty!)
+ └─────────────┘
+       │
+       ▼ (Sampled in background)
+ ┌──────────────────────┐
+ │ Candidate LLM        │ ───► Evaluated by Scorer / LLM Judge ───► Visual Dashboard
+ └──────────────────────┘
+```
+
+1. **Users get immediate responses**: The primary model replies to user requests instantly. The evaluation never slows down or blocks customer traffic.
+2. **Asynchronous shadow calls**: A configurable percentage of live queries (e.g., 5% or 100%) is quietly dispatched to an asynchronous background worker.
+3. **Candidate inference**: The background worker sends the exact same prompt to your new candidate model.
+4. **Automated comparison & scoring**: A scorer (either a fast lexical heuristic or an intelligent **LLM-as-a-Judge**) compares the candidate's response to the primary model's response, grading relevance from `0` to `100`.
+5. **Inspect & monitor**: Review side-by-side outputs, scores, and aggregate metrics in a built-in real-time web dashboard.
+
+---
+
+## ✨ Key Features
+
+* ⚡ **Zero User-Facing Latency**: Primary responses return immediately. Candidate calls and scoring are 100% asynchronous.
+* 🛡️ **Resilient Transactional Outbox**: Powered by the transactional outbox pattern. Even if message queues, candidate endpoints, or scorers go down, live traffic is never disrupted or dropped.
+* ⚖️ **Dual Scoring Backends**:
+  * **Heuristic Scorer**: Completely free, instant lexical metrics (fuzzy sequence match, token overlap F1, and length ratio).
+  * **LLM-as-a-Judge**: Uses an LLM to semantically judge relevance and output a 0–100 score with reasoning.
+* 📊 **Built-In Web Dashboard**: Beautiful, clean web interface to submit test prompts, watch evaluations resolve in real time, and view aggregate metrics.
+* 🔌 **Any OpenAI-Compatible Provider**: Compatible with OpenAI, Anthropic (via proxy), Groq, Together, Ollama, vLLM, or custom internal inference gateways.
+* 📬 **Pluggable Queues**: Out of the box supports transactional Database queues (PostgreSQL / SQLite), AWS SQS, or Azure Service Bus.
+* 🚀 **Zero-Setup Quickstart**: Ships with built-in mock models and an all-in-one local runner (`python run.py`) that runs out-of-the-box without needing Docker or API keys.
+
+---
+
+## 🔄 How It Works
 
 ```mermaid
 flowchart LR
-    Client --> API
-    API --> Primary["Primary LLM"]
-    API --> DB[("PostgreSQL + outbox")]
-    DB --> Worker
-    Worker --> Queue["DB / AWS SQS / Azure Service Bus"]
-    Queue --> Worker
-    Worker --> Candidate["Candidate LLM"]
-    Worker --> Scorer["Heuristic or LLM judge"]
-    Worker --> DB
+    Client(["Client App / User"]) --> API["FastAPI Service"]
+    API -->|"1. Generate (instant)"| Primary["Primary LLM"]
+    Primary -->|"2. Return response"| API
+    API -->|"3. Reply to client"| Client
+    API -.->|"4. Transactional outbox"| DB[("Database")]
+    DB --> Worker["Background Worker"]
+    Worker -->|"5. Run candidate"| Candidate["Candidate LLM"]
+    Worker -->|"6. Score comparison"| Scorer["Heuristic or LLM Judge"]
+    Scorer -->|"7. Save score & metrics"| DB
 ```
 
-The database outbox is transactional with each evaluation state change. A
-broker outage therefore never delays or loses the primary response; the worker
-retries delivery later. Queue processing is at-least-once and each completed
-stage is safe to redeliver.
+### Evaluation Lifecycle
 
-## Run locally
+Each sampled evaluation moves through a resilient state machine:
 
-Docker Compose starts PostgreSQL, the API, and one worker:
+$$\text{queued} \longrightarrow \text{shadow\_running} \longrightarrow \text{score\_queued} \longrightarrow \text{scoring} \longrightarrow \text{complete}$$
+
+If an external LLM call or queue fails, the worker automatically retries using bounded exponential backoff. If max retries are exceeded, the job gracefully moves to `failed` without crashing the service.
+
+---
+
+## 🚀 Quickstart
+
+You can test the system locally in less than a minute.
+
+### Option 1: Local Runner (Fastest — No Docker Needed)
+
+Runs both the FastAPI server and background worker in a single terminal with auto-configured SQLite and mock LLMs:
+
+```bash
+# 1. Clone repository and install dependencies
+git clone https://github.com/srikrishna0130/llm-evaluator.git
+cd "LLM Judge"
+pip install -r requirements.txt
+
+# 2. Start the local runner
+python run.py
+```
+
+That's it! 
+* Open your browser to **<http://localhost:8000>** to explore the dashboard.
+* Interactive API documentation (Swagger) is at **<http://localhost:8000/docs>**.
+* Press `Ctrl+C` anytime to cleanly shut down both the API and worker.
+
+### Option 2: Docker Compose (PostgreSQL Stack)
+
+If you prefer running a complete containerized stack with PostgreSQL:
 
 ```bash
 docker compose up --build
 ```
 
-Open the dashboard at <http://localhost:8000>. It can submit prompts, follow
-sampled evaluations, and show recent scores. Swagger remains available at
-<http://localhost:8000/docs>.
+Access the dashboard at **<http://localhost:8000>**.
 
-The default uses deterministic mock models and samples every request. Try it:
+---
 
-```bash
-curl -X POST http://localhost:8000/api/v1/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{"prompt":"What is a cloud VM?"}'
-```
+## 💻 Trying It Out
 
-```json
-{
-  "response": "[primary] What is a cloud VM?",
-  "model": "primary-mock",
-  "sampled": true,
-  "evaluation_id": "..."
-}
-```
+### 1. Web Dashboard
 
-Fetch the persisted result after the worker finishes:
+Navigate to **<http://localhost:8000>** in your browser:
 
-```bash
-curl http://localhost:8000/api/v1/evaluations/{evaluation_id}
-curl http://localhost:8000/api/v1/evaluations/{evaluation_id}/comparison
-curl http://localhost:8000/api/v1/metrics
-```
+1. Type any prompt into the **New evaluation** input (e.g., *"Explain quantum computing in two sentences"*).
+2. Click **Run evaluation**.
+3. Watch the interface display the primary model response immediately, followed by the background candidate model response and the comparative score.
+4. Check the **Overview** section for aggregate metrics (total, completed, failed, average score) and **Recent evaluations** to inspect previous runs.
 
-## Use real models
+### 2. Interactive Swagger Docs
 
-Copy `.env.example` to `.env`. Both endpoints may be any
-OpenAI-compatible provider:
+Navigate to **<http://localhost:8000/docs>** for full OpenAPI interactive documentation:
+
+* Test endpoints directly from the browser UI with the **Try it out** button.
+* Inspect request and response schemas, error codes, and field definitions for all endpoints.
+
+---
+
+## ⚙️ Connecting Real Models
+
+To evaluate real models (like OpenAI, Groq, Ollama, or vLLM), create or update your `.env` file (see [`.env.example`](.env.example)):
 
 ```env
-SAMPLE_RATE=0.05
+# Percentage of requests to sample for shadow evaluation (e.g. 10% = 0.10)
+SAMPLE_RATE=0.10
 
+# Primary Model (the one serving live users)
 PRIMARY_PROVIDER=openai
-PRIMARY_BASE_URL=https://llm-provider.example/v1
-PRIMARY_API_KEY=...
-PRIMARY_MODEL=primary-model
+PRIMARY_BASE_URL=https://api.openai.com/v1
+PRIMARY_API_KEY=sk-proj-...
+PRIMARY_MODEL=gpt-4o
 
+# Candidate Model (the new model you want to test)
 CANDIDATE_PROVIDER=openai
-CANDIDATE_BASE_URL=https://llm-provider.example/v1
-CANDIDATE_API_KEY=...
-CANDIDATE_MODEL=candidate-model
+CANDIDATE_BASE_URL=https://api.openai.com/v1
+CANDIDATE_API_KEY=sk-proj-...
+CANDIDATE_MODEL=gpt-4o-mini
 ```
 
-The API key names are role-specific so primary and candidate traffic can use
-different providers and credentials.
+> [!TIP]
+> **Independent Provider Credentials**: Primary and candidate models use separate environment variables, so you can easily compare models across different providers (e.g., compare an OpenAI primary with an open-source model hosted on Groq or vLLM).
 
-## Scoring
+---
 
-The scoring stage is a separate queue job, not work performed by the request
-or candidate-inference stage.
+## 🧠 Scoring Backends Explained
 
-- `SCORE_BACKEND=heuristic` is free and combines normalized text similarity,
-  token overlap, and length ratio.
-- `SCORE_BACKEND=llm` uses a deterministic LLM judge and still records the
-  lexical metrics. Set `JUDGE_BASE_URL`, `JUDGE_API_KEY`, and `JUDGE_MODEL`.
+The evaluator supports two scoring modes:
 
-Scores and the scorer's reason are stored in PostgreSQL with both model
-responses, model names, latency, and token usage.
+### 1. Heuristic Scorer (`SCORE_BACKEND=heuristic`)
+* **Cost**: $0 (Runs locally on CPU, no external API calls).
+* **Speed**: Sub-millisecond.
+* **How it works**: Calculates a blended score ($0 - 100$) based on:
+  * **Text Similarity (55%)**: Normalized sequence matcher ratio.
+  * **Token Overlap (35%)**: F1 score of shared words/tokens.
+  * **Length Ratio (10%)**: Compares brevity and verbosity.
+* **Best for**: Sanity checking that candidate models produce roughly similar phrasing, length, and content without spending money.
 
-## Queue backends
+### 2. LLM-as-a-Judge (`SCORE_BACKEND=llm`)
+* **Cost**: Depends on your judge model token pricing.
+* **How it works**: Prompts an impartial judge LLM to evaluate the relevance of the candidate response compared to the primary response and output a structured JSON score ($0 - 100$) and a natural language explanation.
+* **Configuration**:
+  ```env
+  SCORE_BACKEND=llm
+  JUDGE_BASE_URL=https://api.openai.com/v1
+  JUDGE_API_KEY=sk-proj-...
+  JUDGE_MODEL=gpt-4o
+  ```
+* **Best for**: Semantic understanding, catching subtle factual deviations, or evaluating outputs where wording differs significantly but meaning should be preserved.
 
-`QUEUE_BACKEND=database` consumes the PostgreSQL outbox directly. It is the
-smallest deployment and works well at modest volume. Use PostgreSQL for
-multiple workers; SQLite is intended for one local worker only.
+---
 
-For AWS SQS:
+## 📬 Queue & Broker Backends
 
-```bash
-aws sqs create-queue \
-  --queue-name llm-shadow-evaluations \
-  --attributes VisibilityTimeout=120
-```
+Configure `QUEUE_BACKEND` in `.env` based on your scale:
 
-```env
-QUEUE_BACKEND=sqs
-AWS_REGION=us-east-1
-SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/.../llm-shadow-evaluations
-```
+| Backend | Setting | When to use |
+|---|---|---|
+| **Database Outbox** | `QUEUE_BACKEND=database` | Default. Ideal for development and single/multi-worker deployments on PostgreSQL. Requires zero external message brokers. |
+| **AWS SQS** | `QUEUE_BACKEND=sqs` | High-throughput AWS deployments. Uses standard AWS credential chain. Set `AWS_REGION` and `SQS_QUEUE_URL`. |
+| **Azure Service Bus** | `QUEUE_BACKEND=azure` | Enterprise Azure deployments. Set `AZURE_SERVICE_BUS_CONNECTION_STRING` and `AZURE_SERVICE_BUS_QUEUE_NAME`. |
 
-The SDK uses the standard AWS credential chain. [AWS SQS pricing][sqs-pricing]
-currently includes one million requests per month at no charge. Configure a
-dead-letter queue on the SQS queue for operational inspection.
+---
 
-For Azure Service Bus:
+## 📖 API Reference
 
-```env
-QUEUE_BACKEND=azure
-AZURE_SERVICE_BUS_CONNECTION_STRING=...
-AZURE_SERVICE_BUS_QUEUE_NAME=llm-shadow-evaluations
-```
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/v1/evaluate` | Returns primary model output immediately and schedules background shadow evaluation if sampled. |
+| `GET` | `/api/v1/evaluations` | List recent evaluations (supports pagination: `limit`, `offset`). |
+| `GET` | `/api/v1/evaluations/{id}` | Retrieve evaluation details, lifecycle status, prompt, and model outputs. |
+| `GET` | `/api/v1/evaluations/{id}/comparison` | Retrieve the comparison score (0–100), metrics, and judge's explanation. |
+| `GET` | `/api/v1/metrics` | Retrieve summary stats: total, completed, failed counts, and average score. |
+| `GET` | `/api/v1/health` | Health check and database readiness probe. |
 
-Keep the broker lock/visibility timeout longer than one model attempt including
-SDK retries. The project default is 120 seconds.
+---
 
-## API
+## 🧪 Testing
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /api/v1/evaluate` | Return primary output and sample shadow work |
-| `GET /api/v1/evaluations?limit=50&offset=0` | List evaluations |
-| `GET /api/v1/evaluations/{id}` | Read state and both outputs |
-| `GET /api/v1/evaluations/{id}/comparison` | Read the completed score |
-| `GET /api/v1/metrics` | Counts and average score |
-| `GET /api/v1/health` | Database readiness |
-
-States are `queued -> shadow_running -> score_queued -> scoring -> complete`;
-exhausted jobs become `failed`. Candidate and scoring failures retry with
-bounded exponential backoff.
-
-## Run without Docker
-
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\Activate.ps1
-# Linux/macOS: source .venv/bin/activate
-pip install -r requirements-dev.txt
-cp .env.example .env
-uvicorn app.main:app --reload
-```
-
-In another terminal:
-
-```bash
-python -m app.worker
-```
-
-For a no-Docker setup, change `DATABASE_URL` to:
-
-```env
-DATABASE_URL=sqlite+aiosqlite:///./evaluator.db
-```
-
-## Deployment
-
-Run the same image as two components:
-
-- API: the Dockerfile's default command.
-- Worker: `python -m app.worker`.
-
-Use managed PostgreSQL and optionally SQS or Service Bus. Put authentication,
-rate limiting, TLS, and request-size limits at the API gateway. Keep secrets in
-the platform secret manager, run one schema migration/init step per release,
-and alert on `failed` evaluations and outbox backlog.
-
-## Tests
+The test suite validates sampling isolation, transactional outbox persistence, worker stage transitions, backoff retries, SQS/Azure drivers, and both heuristic and LLM scoring:
 
 ```bash
 python -m pytest -q
 ```
 
-Tests cover sampling isolation, persistence, outbox behavior, worker stage
-separation, retries, SQS acknowledgement, and both scoring modes.
+---
 
-[sqs-pricing]: https://aws.amazon.com/sqs/pricing/
+## 🏛️ Project Structure
+
+```
+├── app/
+│   ├── main.py          # FastAPI application & API endpoints
+│   ├── pipeline.py      # Background worker pipeline & stage execution
+│   ├── domain.py        # Pydantic domain models & schemas
+│   ├── scoring.py       # Heuristic & LLM Judge scoring engines
+│   ├── llm.py          # LLM client abstractions (OpenAI & mock)
+│   ├── database.py      # Database layer & transactional outbox
+│   ├── queue.py         # Queue implementations (DB, SQS, Azure)
+│   ├── config.py        # Settings & environment validation
+│   └── static/          # Web dashboard (HTML, CSS, JS)
+├── run.py               # One-click local development runner
+├── docker-compose.yml   # Docker compose configuration
+└── tests/               # Comprehensive automated test suite
+```
+
+---
+
+## 📄 License
+
+MIT License. Feel free to use and adapt this in your own services!

@@ -12,7 +12,7 @@ async def test_dashboard_and_assets_are_served(client):
 
     assert dashboard.status_code == 200
     assert dashboard.headers["content-type"].startswith("text/html")
-    assert "<title>LLM evaluator</title>" in dashboard.text
+    assert "<title>LLM Evaluator</title>" in dashboard.text
     assert stylesheet.status_code == 200
     assert "--accent: #245c46" in stylesheet.text
     assert "width: calc(100% - 20px)" in stylesheet.text
