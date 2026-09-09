@@ -4,6 +4,10 @@ A service for evaluating candidate language models against live production traff
 
 ---
 
+## Demo
+
+https://github.com/user-attachments/assets/e0042814-d368-45a3-a6c0-d640a230fef8
+
 ## Overview
 
 Upgrading or replacing an LLM in production carries risk. Offline evaluations and synthetic benchmarks often fail to capture real-world user queries and edge cases, while routing live traffic directly to an untested model can lead to user-facing regressions.
