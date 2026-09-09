@@ -1,245 +1,222 @@
-# 🎯 LLM Evaluator
+# LLM Evaluator
 
-> **Safely evaluate new, cheaper, or fine-tuned LLMs on live production traffic with automated scoring — with zero added latency for your users.**
-
----
-
-## 💡 What is this for?
-
-Switching Large Language Models (LLMs) in production is stressful:
-
-* You want to switch from an expensive model (e.g. GPT-4o) to a faster, cheaper alternative (e.g. Claude Haiku, Gemini Flash, or a self-hosted Llama 3).
-* You want to benchmark a new prompt template, system prompt, or fine-tuned model against your existing setup.
-* But **offline benchmarks don't reflect real user behavior**, and testing directly in production risks breaking user experience, degrading output quality, or introducing hallucinations.
-
-### The Solution: Shadow Evaluation (Dark Traffic)
-
-**LLM Evaluator** acts as a safety shield. It uses **shadow evaluation** to benchmark models safely in the background:
-
-```
-[ User Request ]
-       │
-       ▼
- ┌─────────────┐
- │ Primary LLM │ ──────► Instant Response back to User (Zero Latency Penalty!)
- └─────────────┘
-       │
-       ▼ (Sampled in background)
- ┌──────────────────────┐
- │ Candidate LLM        │ ───► Evaluated by Scorer / LLM Judge ───► Visual Dashboard
- └──────────────────────┘
-```
-
-1. **Users get immediate responses**: The primary model replies to user requests instantly. The evaluation never slows down or blocks customer traffic.
-2. **Asynchronous shadow calls**: A configurable percentage of live queries (e.g., 5% or 100%) is quietly dispatched to an asynchronous background worker.
-3. **Candidate inference**: The background worker sends the exact same prompt to your new candidate model.
-4. **Automated comparison & scoring**: A scorer (either a fast lexical heuristic or an intelligent **LLM-as-a-Judge**) compares the candidate's response to the primary model's response, grading relevance from `0` to `100`.
-5. **Inspect & monitor**: Review side-by-side outputs, scores, and aggregate metrics in a built-in real-time web dashboard.
+A service for evaluating candidate language models against live production traffic without adding latency to user requests.
 
 ---
 
-## ✨ Key Features
+## Overview
 
-* ⚡ **Zero User-Facing Latency**: Primary responses return immediately. Candidate calls and scoring are 100% asynchronous.
-* 🛡️ **Resilient Transactional Outbox**: Powered by the transactional outbox pattern. Even if message queues, candidate endpoints, or scorers go down, live traffic is never disrupted or dropped.
-* ⚖️ **Dual Scoring Backends**:
-  * **Heuristic Scorer**: Completely free, instant lexical metrics (fuzzy sequence match, token overlap F1, and length ratio).
-  * **LLM-as-a-Judge**: Uses an LLM to semantically judge relevance and output a 0–100 score with reasoning.
-* 📊 **Built-In Web Dashboard**: Beautiful, clean web interface to submit test prompts, watch evaluations resolve in real time, and view aggregate metrics.
-* 🔌 **Any OpenAI-Compatible Provider**: Compatible with OpenAI, Anthropic (via proxy), Groq, Together, Ollama, vLLM, or custom internal inference gateways.
-* 📬 **Pluggable Queues**: Out of the box supports transactional Database queues (PostgreSQL / SQLite), AWS SQS, or Azure Service Bus.
-* 🚀 **Zero-Setup Quickstart**: Ships with built-in mock models and an all-in-one local runner (`python run.py`) that runs out-of-the-box without needing Docker or API keys.
+Upgrading or replacing an LLM in production carries risk. Offline evaluations and synthetic benchmarks often fail to capture real-world user queries and edge cases, while routing live traffic directly to an untested model can lead to user-facing regressions.
+
+LLM Evaluator implements shadow evaluation (dark traffic) to address this:
+
+1. **User requests are served immediately**: The primary model generates and returns its response directly to the client with zero latency overhead.
+2. **Background sampling**: A configurable percentage of requests is recorded in a transactional database outbox.
+3. **Candidate inference**: A background worker process calls the candidate model using the same prompt.
+4. **Automated scoring**: A comparison engine (either lexical heuristics or an LLM judge) scores the candidate's output against the primary model's output on a 0–100 scale.
+5. **Review**: Side-by-side responses and evaluation metrics can be inspected through a web dashboard or queried via REST APIs.
 
 ---
 
-## 🔄 How It Works
+## Features
+
+- **Zero user latency impact**: Primary responses return synchronously; candidate execution and scoring happen entirely in background workers.
+- **Transactional outbox**: Evaluation jobs are written to the database in the same transaction as the request record, ensuring no jobs are dropped even if downstream message brokers or candidate endpoints experience transient outages.
+- **Pluggable scoring**:
+  - *Heuristic scorer*: Fast, local lexical evaluation combining normalized text similarity, token overlap F1, and length ratio.
+  - *LLM judge*: Semantic grading using an impartial model with natural-language reasoning.
+- **Web dashboard**: Local browser interface to submit test prompts, inspect side-by-side completions, and track aggregate pass/fail metrics.
+- **OpenAI-compatible**: Works with OpenAI, Groq, Together AI, Ollama, vLLM, LiteLLM, or any custom endpoint exposing an OpenAI-compatible interface.
+- **Flexible queue backends**: Built-in transactional database queue (PostgreSQL / SQLite), AWS SQS, or Azure Service Bus.
+- **Local development runner**: A single runner script (`python run.py`) starts the API and worker together with mock models and local SQLite storage.
+
+---
+
+## Architecture and Workflow
 
 ```mermaid
 flowchart LR
-    Client(["Client App / User"]) --> API["FastAPI Service"]
-    API -->|"1. Generate (instant)"| Primary["Primary LLM"]
+    Client(["Client"]) --> API["API Service"]
+    API -->|"1. Generate (synchronous)"| Primary["Primary LLM"]
     Primary -->|"2. Return response"| API
-    API -->|"3. Reply to client"| Client
-    API -.->|"4. Transactional outbox"| DB[("Database")]
-    DB --> Worker["Background Worker"]
-    Worker -->|"5. Run candidate"| Candidate["Candidate LLM"]
-    Worker -->|"6. Score comparison"| Scorer["Heuristic or LLM Judge"]
-    Scorer -->|"7. Save score & metrics"| DB
+    API -->|"3. Respond to client"| Client
+    API -.->|"4. Outbox insert"| DB[("Database")]
+    DB --> Worker["Worker Process"]
+    Worker -->|"5. Candidate inference"| Candidate["Candidate LLM"]
+    Worker -->|"6. Score comparison"| Scorer["Scoring Engine"]
+    Scorer -->|"7. Save results"| DB
 ```
 
-### Evaluation Lifecycle
+### Job Lifecycle
 
-Each sampled evaluation moves through a resilient state machine:
+Evaluation jobs progress through the following stages:
 
 $$\text{queued} \longrightarrow \text{shadow\_running} \longrightarrow \text{score\_queued} \longrightarrow \text{scoring} \longrightarrow \text{complete}$$
 
-If an external LLM call or queue fails, the worker automatically retries using bounded exponential backoff. If max retries are exceeded, the job gracefully moves to `failed` without crashing the service.
+If a model call or network operation fails, the worker retries using exponential backoff. Jobs that exhaust configured retry limits are marked as `failed` with error details captured for debugging.
 
 ---
 
-## 🚀 Quickstart
+## Getting Started
 
-You can test the system locally in less than a minute.
+### Prerequisites
 
-### Option 1: Local Runner (Fastest — No Docker Needed)
+- Python 3.10+
+- (Optional) Docker and Docker Compose
 
-Runs both the FastAPI server and background worker in a single terminal with auto-configured SQLite and mock LLMs:
+### Option 1: Local Development Runner
+
+The local runner starts both the FastAPI server and the background worker in a single process manager using SQLite and built-in mock models:
 
 ```bash
-# 1. Clone repository and install dependencies
 git clone https://github.com/srikrishna0130/llm-evaluator.git
 cd "LLM Judge"
 pip install -r requirements.txt
-
-# 2. Start the local runner
 python run.py
 ```
 
-That's it! 
-* Open your browser to **<http://localhost:8000>** to explore the dashboard.
-* Interactive API documentation (Swagger) is at **<http://localhost:8000/docs>**.
-* Press `Ctrl+C` anytime to cleanly shut down both the API and worker.
+- Web dashboard: http://localhost:8000
+- OpenAPI documentation: http://localhost:8000/docs
+- Stop: Press `Ctrl+C` to shut down both the server and worker.
 
-### Option 2: Docker Compose (PostgreSQL Stack)
+### Option 2: Docker Compose
 
-If you prefer running a complete containerized stack with PostgreSQL:
+To run the full stack with PostgreSQL:
 
 ```bash
 docker compose up --build
 ```
 
-Access the dashboard at **<http://localhost:8000>**.
+The service will be accessible at http://localhost:8000.
 
 ---
 
-## 💻 Trying It Out
+## Usage
 
-### 1. Web Dashboard
+### Web Dashboard
 
-Navigate to **<http://localhost:8000>** in your browser:
+Open http://localhost:8000 in your browser:
 
-1. Type any prompt into the **New evaluation** input (e.g., *"Explain quantum computing in two sentences"*).
-2. Click **Run evaluation**.
-3. Watch the interface display the primary model response immediately, followed by the background candidate model response and the comparative score.
-4. Check the **Overview** section for aggregate metrics (total, completed, failed, average score) and **Recent evaluations** to inspect previous runs.
+1. Enter a prompt in the **New evaluation** form and submit.
+2. The primary response appears immediately.
+3. Once the background worker finishes, the candidate response and comparative score are displayed.
+4. The **Overview** and **Recent evaluations** sections display aggregate metrics and historical runs.
 
-### 2. Interactive Swagger Docs
+### API Documentation
 
-Navigate to **<http://localhost:8000/docs>** for full OpenAPI interactive documentation:
-
-* Test endpoints directly from the browser UI with the **Try it out** button.
-* Inspect request and response schemas, error codes, and field definitions for all endpoints.
+Interactive OpenAPI documentation is available at http://localhost:8000/docs. You can test endpoints, review request bodies, and inspect response schemas directly from the Swagger UI.
 
 ---
 
-## ⚙️ Connecting Real Models
+## Model Configuration
 
-To evaluate real models (like OpenAI, Groq, Ollama, or vLLM), create or update your `.env` file (see [`.env.example`](.env.example)):
+Model settings are configured via environment variables in `.env` (see `.env.example`):
 
 ```env
-# Percentage of requests to sample for shadow evaluation (e.g. 10% = 0.10)
+# Sampling fraction (0.0 to 1.0)
 SAMPLE_RATE=0.10
 
-# Primary Model (the one serving live users)
+# Primary Model (production traffic)
 PRIMARY_PROVIDER=openai
 PRIMARY_BASE_URL=https://api.openai.com/v1
-PRIMARY_API_KEY=sk-proj-...
+PRIMARY_API_KEY=your-api-key
 PRIMARY_MODEL=gpt-4o
 
-# Candidate Model (the new model you want to test)
+# Candidate Model (model under evaluation)
 CANDIDATE_PROVIDER=openai
 CANDIDATE_BASE_URL=https://api.openai.com/v1
-CANDIDATE_API_KEY=sk-proj-...
+CANDIDATE_API_KEY=your-api-key
 CANDIDATE_MODEL=gpt-4o-mini
 ```
 
-> [!TIP]
-> **Independent Provider Credentials**: Primary and candidate models use separate environment variables, so you can easily compare models across different providers (e.g., compare an OpenAI primary with an open-source model hosted on Groq or vLLM).
+Primary, candidate, and judge configurations use independent base URLs and credentials, allowing cross-provider comparisons (for example, comparing an OpenAI primary model against an open-source model running on vLLM or Groq).
 
 ---
 
-## 🧠 Scoring Backends Explained
+## Scoring Engines
 
-The evaluator supports two scoring modes:
+### Heuristic Scorer (`SCORE_BACKEND=heuristic`)
 
-### 1. Heuristic Scorer (`SCORE_BACKEND=heuristic`)
-* **Cost**: $0 (Runs locally on CPU, no external API calls).
-* **Speed**: Sub-millisecond.
-* **How it works**: Calculates a blended score ($0 - 100$) based on:
-  * **Text Similarity (55%)**: Normalized sequence matcher ratio.
-  * **Token Overlap (35%)**: F1 score of shared words/tokens.
-  * **Length Ratio (10%)**: Compares brevity and verbosity.
-* **Best for**: Sanity checking that candidate models produce roughly similar phrasing, length, and content without spending money.
+Calculates a blended lexical score (0–100) locally on the CPU without external API calls:
 
-### 2. LLM-as-a-Judge (`SCORE_BACKEND=llm`)
-* **Cost**: Depends on your judge model token pricing.
-* **How it works**: Prompts an impartial judge LLM to evaluate the relevance of the candidate response compared to the primary response and output a structured JSON score ($0 - 100$) and a natural language explanation.
-* **Configuration**:
-  ```env
-  SCORE_BACKEND=llm
-  JUDGE_BASE_URL=https://api.openai.com/v1
-  JUDGE_API_KEY=sk-proj-...
-  JUDGE_MODEL=gpt-4o
-  ```
-* **Best for**: Semantic understanding, catching subtle factual deviations, or evaluating outputs where wording differs significantly but meaning should be preserved.
+- **Text similarity (55%)**: Sequence matcher ratio between normalized responses.
+- **Token overlap (35%)**: Word-level F1 score of shared tokens.
+- **Length ratio (10%)**: Length ratio between shorter and longer responses.
+
+Best for catching gross formatting deviations, truncated outputs, or ensuring candidate outputs match the general structure of the primary response at zero cost.
+
+### LLM Judge (`SCORE_BACKEND=llm`)
+
+Uses an independent language model to evaluate response relevance:
+
+```env
+SCORE_BACKEND=llm
+JUDGE_BASE_URL=https://api.openai.com/v1
+JUDGE_API_KEY=your-api-key
+JUDGE_MODEL=gpt-4o
+```
+
+The judge evaluates candidate outputs strictly on semantic relevance relative to the primary response, returning a numerical score (0–100) along with an explanation.
 
 ---
 
-## 📬 Queue & Broker Backends
+## Queue Backends
 
-Configure `QUEUE_BACKEND` in `.env` based on your scale:
+Queue backends are configured with `QUEUE_BACKEND`:
 
-| Backend | Setting | When to use |
+| Backend | Value | Description |
 |---|---|---|
-| **Database Outbox** | `QUEUE_BACKEND=database` | Default. Ideal for development and single/multi-worker deployments on PostgreSQL. Requires zero external message brokers. |
-| **AWS SQS** | `QUEUE_BACKEND=sqs` | High-throughput AWS deployments. Uses standard AWS credential chain. Set `AWS_REGION` and `SQS_QUEUE_URL`. |
-| **Azure Service Bus** | `QUEUE_BACKEND=azure` | Enterprise Azure deployments. Set `AZURE_SERVICE_BUS_CONNECTION_STRING` and `AZURE_SERVICE_BUS_QUEUE_NAME`. |
+| Database Outbox | `database` | Consumes directly from the PostgreSQL or SQLite outbox table. Recommended for standard deployments without external message brokers. |
+| AWS SQS | `sqs` | Reads from Amazon SQS. Uses standard AWS IAM credentials. Requires `AWS_REGION` and `SQS_QUEUE_URL`. |
+| Azure Service Bus | `azure` | Reads from an Azure Service Bus queue. Requires `AZURE_SERVICE_BUS_CONNECTION_STRING` and `AZURE_SERVICE_BUS_QUEUE_NAME`. |
 
 ---
 
-## 📖 API Reference
+## API Reference
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/v1/evaluate` | Returns primary model output immediately and schedules background shadow evaluation if sampled. |
-| `GET` | `/api/v1/evaluations` | List recent evaluations (supports pagination: `limit`, `offset`). |
-| `GET` | `/api/v1/evaluations/{id}` | Retrieve evaluation details, lifecycle status, prompt, and model outputs. |
-| `GET` | `/api/v1/evaluations/{id}/comparison` | Retrieve the comparison score (0–100), metrics, and judge's explanation. |
-| `GET` | `/api/v1/metrics` | Retrieve summary stats: total, completed, failed counts, and average score. |
-| `GET` | `/api/v1/health` | Health check and database readiness probe. |
+| `POST` | `/api/v1/evaluate` | Generates primary output synchronously and schedules candidate evaluation if sampled. |
+| `GET` | `/api/v1/evaluations` | Lists stored evaluations with pagination (`limit`, `offset`). |
+| `GET` | `/api/v1/evaluations/{id}` | Retrieves full record for an evaluation, including prompt and model outputs. |
+| `GET` | `/api/v1/evaluations/{id}/comparison` | Retrieves score, metrics breakdown, and reason for an evaluation. |
+| `GET` | `/api/v1/metrics` | Returns system totals (total, completed, failed counts, average score). |
+| `GET` | `/api/v1/health` | Readiness probe verifying database connectivity. |
 
 ---
 
-## 🧪 Testing
+## Testing
 
-The test suite validates sampling isolation, transactional outbox persistence, worker stage transitions, backoff retries, SQS/Azure drivers, and both heuristic and LLM scoring:
+Run the automated test suite with pytest:
 
 ```bash
 python -m pytest -q
 ```
 
+Tests cover request sampling isolation, transactional outbox operations, state machine transitions, worker retry policies, queue adapters, and scoring implementations.
+
 ---
 
-## 🏛️ Project Structure
+## Project Structure
 
 ```
 ├── app/
-│   ├── main.py          # FastAPI application & API endpoints
-│   ├── pipeline.py      # Background worker pipeline & stage execution
-│   ├── domain.py        # Pydantic domain models & schemas
-│   ├── scoring.py       # Heuristic & LLM Judge scoring engines
-│   ├── llm.py          # LLM client abstractions (OpenAI & mock)
-│   ├── database.py      # Database layer & transactional outbox
-│   ├── queue.py         # Queue implementations (DB, SQS, Azure)
-│   ├── config.py        # Settings & environment validation
-│   └── static/          # Web dashboard (HTML, CSS, JS)
-├── run.py               # One-click local development runner
-├── docker-compose.yml   # Docker compose configuration
-└── tests/               # Comprehensive automated test suite
+│   ├── main.py          # FastAPI application and route handlers
+│   ├── pipeline.py      # Evaluation pipeline and worker coordination
+│   ├── domain.py        # Pydantic domain models and status enums
+│   ├── scoring.py       # Heuristic and LLM Judge scoring implementations
+│   ├── llm.py          # LLM client abstractions (OpenAI and mock)
+│   ├── database.py      # Database layer and transactional outbox
+│   ├── queue.py         # Queue adapters (Database, SQS, Azure)
+│   ├── config.py        # Application settings and environment validation
+│   └── static/          # Web dashboard assets (HTML, CSS, JS)
+├── run.py               # Local process runner (API + worker)
+├── docker-compose.yml   # Multi-container Docker configuration
+└── tests/               # Automated test suite
 ```
 
 ---
 
-## 📄 License
+## License
 
-MIT License. Feel free to use and adapt this in your own services!
+MIT License.

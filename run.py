@@ -41,7 +41,7 @@ def ensure_env_file() -> None:
 def print_banner(host: str, port: int) -> None:
     border = "=" * 64
     print(border)
-    print("  🚀 LLM Evaluator - Local Development Runner")
+    print("  LLM Evaluator - Local Development Runner")
     print(border)
     print(f"  • Web Dashboard : http://{host}:{port}")
     print(f"  • Swagger Docs  : http://{host}:{port}/docs")
