@@ -55,7 +55,7 @@ flowchart LR
 
 Evaluation jobs progress through the following stages:
 
-$$\text{queued} \longrightarrow \text{shadow\_running} \longrightarrow \text{score\_queued} \longrightarrow \text{scoring} \longrightarrow \text{complete}$$
+`queued` → `shadow_running` → `score_queued` → `scoring` → `complete`
 
 If a model call or network operation fails, the worker retries using exponential backoff. Jobs that exhaust configured retry limits are marked as `failed` with error details captured for debugging.
 
